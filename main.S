@@ -182,7 +182,7 @@ eval_expr.cons:
 eval_expr.operator.quote:
     # make sure the operator has 1 arg
     mov     rdi, r15
-    call    args_list_length
+    call    list_length
     cmp     rax, 1
     mov     rax, return.wrong_arg_count    
     jne     eval_expr.done
@@ -196,7 +196,7 @@ eval_expr.operator.quote:
 eval_expr.operator.def:
     # make sure the operator has 2 args
     mov     rdi, r15
-    call    args_list_length
+    call    list_length
     cmp     rax, 2
     mov     rax, return.wrong_arg_count    
     jne     eval_expr.done
@@ -1204,7 +1204,7 @@ env_set_builtin:
 /**
     Returns the length of a list.
 */
-args_list_length:
+list_length:
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -1213,20 +1213,87 @@ args_list_length:
     mov     rbx, rdi
     mov     r12, 0
 
-args_list_length.next:
+list_length.next:
     call    nil?
-    je      args_list_length.done
+    je      list_length.done
     mov     rdi, rbx
     call    cdr
     mov     rbx, rax
     mov     rdi, rax
     add     r12, 1
-    jmp     args_list_length.next
+    jmp     list_length.next
 
-args_list_length.done:
+list_length.done:
     mov     rax, r12
     pop     r12
     pop     rbx
+    leave
+    ret
+
+/**
+    Folds a list.
+    rdi: list
+    rsi: accumulator address
+    rdx: function
+*/
+list_fold:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 8
+    push    rbx
+    push    r12
+    push    r13
+
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx
+    jmp     list_fold.first
+
+list_fold.next:
+    call    nil?
+    je      list_fold.ok
+
+list_fold.first:
+    mov     rdi, rbx
+    call    car
+    mov     rdi, rax
+    mov     rsi, r12
+    call    r13
+    cmp     rax, return.ok
+    jne     list_fold.done
+    mov     rdi, rbx
+    call    cdr
+    mov     rbx, rax
+    mov     rdi, rax
+    jmp     list_fold.next
+
+list_fold.ok:
+    mov     rax, return.ok
+list_fold.done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    add     rsp, 8
+    leave
+    ret
+
+
+/**
+*/
+check_obj_numeric:
+    push    rbp
+    mov     rbp, rsp
+    cmp     byte ptr [rdi + obj_field.type], obj_type.integer
+    je      check_obj_numeric.ok
+    cmp     byte ptr [rdi + obj_field.type], obj_type.double
+    je      check_obj_numeric.ok
+    mov     rax, return.type_mismatch
+    jmp     check_obj_numeric.done
+ 
+check_obj_numeric.ok:
+    mov     rax, return.ok
+
+check_obj_numeric.done: 
     leave
     ret
 
@@ -1392,14 +1459,11 @@ builtin.arit:
 
     # arithmetic ops require 2 args 
     mov         rdi, r12
-    call        args_list_length
+    call        list_length
     cmp         rax, 2
     mov         rax, return.wrong_arg_count
     jne         builtin.arit.done
 
-    # [rbp - 8] holds the number of fp arguments
-    mov         qword ptr [rbp - 8], 0 
- 
     # load the first 2 args
     # (car args)
     # (car (cdr args))
@@ -1412,6 +1476,16 @@ builtin.arit:
     call        car
     mov         r15, rax
 
+    # check that the args type is either integer or double
+    mov         rdi, r12
+    lea         rdx, [rip + check_obj_numeric]
+    call        list_fold
+    cmp         rax, return.ok
+    jne         builtin.arit.done 
+
+    # [rbp - 8] holds the number of fp arguments
+    mov         qword ptr [rbp - 8], 0 
+ 
     # check that the args type is integer
     cmp         byte ptr [r14 + obj_field.type], obj_type.integer
     jne         1f
