@@ -10,6 +10,7 @@
 .set obj_type.integer,  4
 .set obj_type.double,   5
 .set obj_type.builtin,  6
+.set obj_type.lambda,   7
 
 .set obj_field.type,    0
 .set obj_field.value,   8
@@ -176,6 +177,12 @@ eval_expr.cons:
     call    _strcmp
     cmp     rax, 0
     je      eval_expr.operator.def
+    # op: lambda
+    mov     rdi, [r14 + obj_field.value]
+    lea     rsi, [rip + operator.lambda]
+    call    _strcmp
+    cmp     rax, 0
+    je      eval_expr.operator.lambda
     # op: function
     jmp     eval_expr.function
 
@@ -224,6 +231,32 @@ eval_expr.operator.def:
     mov     rsi, r14
     mov     rdx, [rbp - 8]
     call    env_set
+    jmp     eval_expr.done
+
+eval_expr.operator.lambda:
+    # make sure the operator has at least 2 args
+    mov     rdi, r15
+    call    list_length
+    cmp     rax, 2
+    mov     rax, return.wrong_arg_count
+    jl      eval_expr.done 
+
+    # lambda args
+    mov     rdi, r15
+    call    car
+    mov     r14, rax
+
+    # lambda body
+    mov     rdi, r15
+    call    cdr
+    mov     r15, rax
+
+    # make the lambda obj
+    mov     rdi, r12
+    mov     rsi, r14
+    mov     rdx, r15
+    mov     rcx, r13
+    call    new_lambda
     jmp     eval_expr.done
 
 eval_expr.function:
@@ -284,18 +317,124 @@ eval_expr.done:
 apply:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 8
+    sub     rsp, 24
     push    rbx
-    cmp     byte ptr [rdi + obj_field.type], obj_type.builtin
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx 
+
+    cmp     byte ptr [rbx + obj_field.type], obj_type.builtin
+    je      apply.builtin
+    cmp     byte ptr [rbx + obj_field.type], obj_type.lambda
+    je      apply.lambda
     mov     rax, return.type_mismatch
+    jmp     apply.done
+
+apply.lambda:
+    mov     rdi, rbx
+    call    car
+    mov     rdi, rax
+    call    new_env
+    # env
+    mov     r14, rax
+    # arg symbols
+    mov     rdi, rbx
+    call    cdr
+    mov     rdi, rax
+    call    car
+    mov     r15, rax 
+    # fn body
+    mov     rdi, rbx
+    call    cdr
+    mov     rdi, rax
+    call    cdr
+    mov     [rbp - 8], rax
+
+    # bind the args
+    mov     rdi, r15
+
+apply.lambda_bind_next:
+    call    nil?
+    je      apply.lambda_evaluate
+    # no args left
+    mov     rdi, r12
+    call    nil?
+    mov     rax, return.wrong_arg_count
+    je      apply.done
+    # bind
+    # symbol
+    mov     rdi, r15
+    call    car
+    mov     [rbp - 16], rax
+    # value
+    mov     rdi, r12
+    call    car
+    mov     [rbp - 24], rax
+    # set env
+    mov     rdi, r14
+    mov     rsi, [rbp - 16]
+    mov     rdx, [rbp - 24]
+    call    env_set
+    # next symbol
+    mov     rdi, r15
+    call    cdr
+    mov     r15, rax
+    # next arg
+    mov     rdi, r12
+    call    cdr
+    mov     r12, rax
+    # loop
+    mov     rdi, r15
+    jmp     apply.lambda_bind_next
+
+apply.lambda_evaluate:
+    # check that there's no arg value left
+    mov     rdi, r12
+    call    nil?
+    mov     rax, return.wrong_arg_count
+    jne     apply.done 
+    # evaluate the body of the lambda
+    mov     rdi, [rbp - 8]
+
+apply.lambda_evaluate_body_next:
+    call    nil?
+    mov     rax, return.ok
+    je      apply.done
+    # current statement
+    mov     rdi, [rbp - 8]
+    call    car
+    # eval
+    mov     rdi, rax
+    mov     rsi, r14
+    mov     rdx, r13
+    call    eval_expr
+    cmp     rax, return.ok
     jne     apply.done
-    mov     rbx, [rdi + obj_field.value]
-    mov     rdi, rsi
-    mov     rsi, rdx
-    call    rbx
+    # next statement
+    mov     rdi, [rbp - 8]
+    call    cdr
+    mov     [rbp - 8], rax
+    mov     rdi, rax
+    jmp     apply.lambda_evaluate_body_next
+
+apply.builtin:
+    mov     r8, [rbx + obj_field.value]
+    mov     rdi, r12
+    mov     rsi, r13
+    call    r8
+
 apply.done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
-    add     rsp, 8
+    add     rsp, 24
     leave
     ret
 
@@ -791,6 +930,81 @@ env_get.done:
     ret
 
 /**
+    Creates a lambda obj.
+    rdi: env
+    rsi: args
+    rdx: body
+    rcx: pointer to the address of the resulting object
+*/
+new_lambda:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+
+    # save args
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx
+    mov     r14, rcx
+    
+    # both rsi and rdx must point to a list
+    mov     rdi, r12
+    call    list?
+    mov     rax, return.syntax_error
+    jne     new_lambda.done
+
+    mov     rdi, r13
+    call    list?
+    mov     rax, return.syntax_error
+    jne     new_lambda.done
+
+    # each arg must be a symbol
+    mov     rdi, r12
+    lea     rdx, [rip + check_obj_symbol]
+    call    list_fold
+    cmp     rax, return.ok
+    jne     new_lambda.done
+
+    # make the obj
+    mov     rdi, r12
+    mov     rsi, r13
+    call    cons
+    mov     rdi, rbx
+    mov     rsi, rax
+    call    cons
+    mov     byte ptr [rax + obj_field.type], obj_type.lambda
+    mov     [r14], rax
+    mov     rax, return.ok
+
+new_lambda.done:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    leave
+    ret 
+
+/**
+*/
+check_obj_symbol:
+    push    rbp
+    mov     rbp, rsp
+    cmp     byte ptr [rdi + obj_field.type], obj_type.symbol
+    je      check_obj_symbol.ok
+    mov     rax, return.type_mismatch
+    jmp     check_obj_symbol.done
+ 
+check_obj_symbol.ok:
+    mov     rax, return.ok
+
+check_obj_symbol.done: 
+    leave
+    ret
+
+/**
     Creates a symbol obj.
     rdi: symbol
 */
@@ -1012,6 +1226,9 @@ print_expr:
     # builtin
     cmp     rbx, obj_type.builtin
     je      print_expr.builtin
+    # lambda
+    cmp     rbx, obj_type.lambda
+    je      print_expr.lambda
     # unknown
     jmp     print_expr.done
 
@@ -1093,6 +1310,11 @@ print_expr.double:
 print_expr.builtin:
     lea     rdi, [rip + obj.builtin.fmt]
     mov     rsi, [r12 + obj_field.value]
+    call    _printf
+    jmp     print_expr.done
+
+print_expr.lambda:
+    lea     rdi, [rip + obj.lambda.fmt]
     call    _printf
 
 print_expr.done:
@@ -1698,11 +1920,15 @@ obj.double.fmt:
     .string "%f"
 obj.builtin.fmt:
     .string "ƒ@%p"
+obj.lambda.fmt:
+    .string "λ"
 
 operator.quote:
     .string "quote"
 operator.def:
     .string "def"
+operator.lambda:
+    .string "lambda"
 
 debug.cons_separator:
     .string " . "
